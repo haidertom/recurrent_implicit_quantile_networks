@@ -1,17 +1,18 @@
-import gym
-import time
 import math
-import torch
+import time
+
+import gym
+import matplotlib.pyplot as plt
 import numpy as np
 import sklearn.metrics
+import torch
 from gym import wrappers
-import autoregressive_control
-import matplotlib.pyplot as plt
-from sklearn.svm import OneClassSVM
-from sklearn.metrics import roc_curve
 from sklearn.ensemble import IsolationForest
-from sklearn.neighbors import NearestNeighbors
-from sklearn.neighbors import LocalOutlierFactor
+from sklearn.metrics import roc_curve
+from sklearn.neighbors import LocalOutlierFactor, NearestNeighbors
+from sklearn.svm import OneClassSVM
+
+import autoregressive_control
 
 
 def feature_index_extractor(gvd_name):
@@ -104,13 +105,15 @@ def isolation_forest(distribution, actual_return):
 
 
 def oneclass_svm(distribution, actual_return):
-    clf = OneClassSVM(gamma='scale', nu=0.03)
+    clf = OneClassSVM(gamma="scale", nu=0.03)
     clf.fit(distribution.reshape(-1, 1))
     score = clf.score_samples(np.array(actual_return).reshape(-1, 1))[0]
     return score
 
 
-def anomaly_score_undiscounted(transitions, starting_action, gvd_model, batch_size, num_quantile_sample, as_method, h_s, gvd_name, type):
+def anomaly_score_undiscounted(
+    transitions, starting_action, gvd_model, batch_size, num_quantile_sample, as_method, h_s, gvd_name, type
+):
     starting_state = torch.Tensor(transitions[0]).unsqueeze(0)
     tau = torch.Tensor(np.random.rand(batch_size * num_quantile_sample, 1))
     value_dist, h_s = gvd_model(starting_state, h_s, tau, num_quantile_sample)
@@ -125,7 +128,9 @@ def anomaly_score_undiscounted(transitions, starting_action, gvd_model, batch_si
     elif type == "time_avg":
         expected_value = np.sum(np.diff(np.array(transitions), axis=0), axis=0)[feature_index] / (len(transitions) - 1)
     else:
-        assert False, "Undefined/unknown method given to calculate the target return for GVDs. Notice the given arguments!"
+        assert (
+            False
+        ), "Undefined/unknown method given to calculate the target return for GVDs. Notice the given arguments!"
 
     if as_method == "histogram":
         norm_score = histogram_likelihood(value_dist.cpu().numpy(), round(expected_value, 5))
@@ -167,7 +172,9 @@ def process_anomalies(args, env, all_gvd_models, main_model, epsilon, gamma, hor
                 for h in horizons:
                     ep_scores[gvd_name + "_" + str(h)] = []
             while not done:
-                action, z_values = autoregressive_control.get_action(state, main_model, epsilon, env, args.num_quantile_sample)
+                action, z_values = autoregressive_control.get_action(
+                    state, main_model, epsilon, env, args.num_quantile_sample
+                )
 
                 next_state, reward, done, _ = env.step(action)
                 next_state = torch.Tensor(next_state).unsqueeze(0)
@@ -178,13 +185,23 @@ def process_anomalies(args, env, all_gvd_models, main_model, epsilon, gamma, hor
                     all_actions[gvd_name].append(action)
                     for h in horizons:
                         if len(all_transitions[gvd_name]) > h:
-                            gvd_model = [all_gvd_models[x][0] for x in range(len(all_gvd_models)) if all_gvd_models[x][1] == gvd_name][0]
+                            gvd_model = [
+                                all_gvd_models[x][0]
+                                for x in range(len(all_gvd_models))
+                                if all_gvd_models[x][1] == gvd_name
+                            ][0]
                             if args.recurrent_gvd:
-                                n_score, h_s = anomaly_score_undiscounted(all_transitions[gvd_name][-h - 1:],
-                                                                          all_actions[gvd_name][-h - 1:][0], gvd_model,
-                                                                          batch_size, args.num_quantile_sample,
-                                                                          args.score_calc_method,
-                                                                          h_s_dict[gvd_name.split("_0")[0]], gvd_name, type)
+                                n_score, h_s = anomaly_score_undiscounted(
+                                    all_transitions[gvd_name][-h - 1 :],
+                                    all_actions[gvd_name][-h - 1 :][0],
+                                    gvd_model,
+                                    batch_size,
+                                    args.num_quantile_sample,
+                                    args.score_calc_method,
+                                    h_s_dict[gvd_name.split("_0")[0]],
+                                    gvd_name,
+                                    type,
+                                )
                                 h_s_dict[gvd_name.split("_0")[0]] = h_s
                             ep_scores[gvd_name + "_" + str(h)].append(n_score)
                 state = next_state
@@ -250,7 +267,7 @@ def combined_confusion_matrix(combined_scores, randomness_starts, as_c_method):
             auc = sklearn.metrics.auc(fprs, tprs)
             results[key] = (fprs, tprs, thresholds, auc)
         else:
-            fpr, tpr, thresholds = roc_curve(labels[:len(sc)], sc)
+            fpr, tpr, thresholds = roc_curve(labels[: len(sc)], sc)
             auc = sklearn.metrics.auc(fpr, tpr)
             results[key] = (fpr, tpr, thresholds, auc)
     return results

@@ -83,6 +83,7 @@ def make_env(env_id, rank=0, seed=0, log_dir=None, wrapper_class=None, env_kwarg
             env = wrapper_class(env)
 
         env.seed(seed + rank)
+        env.action_space.seed(seed + rank)
         log_file = os.path.join(log_dir, str(rank)) if log_dir is not None else None
         env = Monitor(env, log_file)
         return env

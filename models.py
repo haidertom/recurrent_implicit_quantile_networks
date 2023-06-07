@@ -33,17 +33,20 @@ class IQN(nn.Module):
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
+        
+        self.to(self.device)
 
     def forward(self, state, tau, num_quantiles):
+
         input_size = state.size()[0]  # batch_size(train) or 1(get_action)
         tau = tau.expand(input_size * num_quantiles, self.quantile_embedding_dim)
         pi_mtx = torch.Tensor(np.pi * np.arange(0, self.quantile_embedding_dim)).expand(input_size * num_quantiles, self.quantile_embedding_dim)
-        cos_tau = torch.cos(tau * pi_mtx)
+        cos_tau = torch.cos(tau * pi_mtx).to(self.device)
 
         phi = self.phi(cos_tau)
         phi = F.relu(phi)
 
-        state_tile = state.expand(input_size, num_quantiles, self.num_inputs)
+        state_tile = state.expand(input_size, num_quantiles, self.num_inputs).to(self.device)
         state_tile = state_tile.flatten().view(-1, self.num_inputs)
 
         x = F.relu(self.fc1(state_tile))
@@ -231,7 +234,7 @@ class ReplayMemory(object):
 
 
 class Memory_w_na(object):
-    def __init__(self, capacity):
+    def __init__(self, capacity=10_000_000):
         self.memory = deque(maxlen=capacity)
         self.capacity = capacity
 

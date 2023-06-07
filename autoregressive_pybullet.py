@@ -1,26 +1,30 @@
-import os
-import gym
-import math
-import torch
-import random
-import sklearn
 import argparse
-import numpy as np
-import pybullet_envs
-import torch.nn as nn
-import seaborn as sns
-import env_preparation
+import math
+import os
+import random
+
+import gym
 import matplotlib.pyplot as plt
-from detecta import detect_cusum
-from stable_baselines3 import TD3
-from sklearn.metrics import roc_curve
+import numpy as np
+import ood_baselines.riqn.env_preparation
+import seaborn as sns
+import sklearn
+import torch
+
+# import pybullet_envs
+import torch.nn as nn
 import torch.nn.functional as functional
+
+# from detecta import detect_cusum
+from sklearn.metrics import roc_curve
 from sklearn.neighbors import NearestNeighbors
+from stable_baselines3 import TD3
+from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, VecVideoRecorder
 from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.sampler import SubsetRandomSampler
-from stable_baselines3.common.evaluation import evaluate_policy
-from stable_baselines3.common.vec_env import VecNormalize, VecVideoRecorder, DummyVecEnv
-sns.set()
+
+# sns.set()
 
 
 class AutoregressiveRecurrentIQN_v2(nn.Module):
@@ -45,8 +49,9 @@ class AutoregressiveRecurrentIQN_v2(nn.Module):
     def forward(self, state, hx, tau, num_quantiles):
         input_size = state.size()[0]  # batch_size(train) or 1(get_action)
         tau = tau.expand(input_size * num_quantiles, self.quantile_embedding_dim)
-        pi_mtx = torch.Tensor(np.pi * np.arange(0, self.quantile_embedding_dim)).expand(input_size * num_quantiles,
-                                                                                        self.quantile_embedding_dim)
+        pi_mtx = torch.Tensor(np.pi * np.arange(0, self.quantile_embedding_dim)).expand(
+            input_size * num_quantiles, self.quantile_embedding_dim
+        )
         cos_tau = torch.cos(tau * pi_mtx).to(self.device)
 
         phi = self.phi(cos_tau)
@@ -85,8 +90,9 @@ class AutoregressiveIQN(nn.Module):
     def forward(self, state, tau, num_quantiles):
         input_size = state.size()[0]  # batch_size(train) or 1(get_action)
         tau = tau.expand(input_size * num_quantiles, self.quantile_embedding_dim)
-        pi_mtx = torch.Tensor(np.pi * np.arange(0, self.quantile_embedding_dim)).expand(input_size * num_quantiles,
-                                                                                        self.quantile_embedding_dim)
+        pi_mtx = torch.Tensor(np.pi * np.arange(0, self.quantile_embedding_dim)).expand(
+            input_size * num_quantiles, self.quantile_embedding_dim
+        )
         cos_tau = torch.cos(tau * pi_mtx).to(self.device)
 
         phi = self.phi(cos_tau)
@@ -104,7 +110,7 @@ class AutoregressiveIQN(nn.Module):
         return z
 
 
-def construct_batch_data(feature_len, dataset, device):
+def construct_batch_data(feature_len, dataset, device, has_time_feature=False):
     episodes_states = []
     episodes_next_states = []
     episodes_len = []
@@ -112,12 +118,23 @@ def construct_batch_data(feature_len, dataset, device):
         episodes_len.append(len(episode))
     max_len = max(episodes_len) - 1
     for i, episode in enumerate(dataset):
-        # get rid of features added by TimeFeatureWrapper
-        episode = np.array(episode).squeeze(1)[:,:-1]
-        episodes_states.append(torch.Tensor(
-            np.concatenate((episode[:-1, :], np.zeros((max_len - len(episode[:-1, :]), feature_len))), axis=0)))
-        episodes_next_states.append(torch.Tensor(
-            np.concatenate((episode[1:, :], np.zeros((max_len - len(episode[1:, :]), feature_len))), axis=0)))
+        try:
+            episode = np.array(episode).squeeze(1)
+        except:
+            pass
+        if has_time_feature:
+            # print('get rid of features added by TimeFeatureWrapper ')
+            episode = episode[:, :-1]
+        episodes_states.append(
+            torch.Tensor(
+                np.concatenate((episode[:-1, :], np.zeros((max_len - len(episode[:-1, :]), feature_len))), axis=0)
+            )
+        )
+        episodes_next_states.append(
+            torch.Tensor(
+                np.concatenate((episode[1:, :], np.zeros((max_len - len(episode[1:, :]), feature_len))), axis=0)
+            )
+        )
 
     episodes_states = torch.stack(episodes_states).to(device)
     episodes_next_states = torch.stack(episodes_next_states).to(device)
@@ -134,13 +151,14 @@ def data_splitting(tensor_dataset, batch_size, features_min, features_max, devic
     for index in no_need_normalization:
         normalized_states[:, index] = features_min[index]
         normalized_n_states[:, index] = features_min[index]
-    normalized_tensor_dataset = torch.utils.data.TensorDataset(torch.Tensor(normalized_states).to(device),
-                                                               torch.Tensor(normalized_n_states).to(device))
+    normalized_tensor_dataset = torch.utils.data.TensorDataset(
+        torch.Tensor(normalized_states).to(device), torch.Tensor(normalized_n_states).to(device)
+    )
     all_indices = np.arange(len(normalized_tensor_dataset))
     max_len = len(normalized_tensor_dataset[0][0])
     np.random.shuffle(all_indices)
-    train_indices = all_indices[:int(len(all_indices) * 90 / 100)]
-    test_indices = all_indices[int(len(all_indices) * 90 / 100):]
+    train_indices = all_indices[: int(len(all_indices) * 90 / 100)]
+    test_indices = all_indices[int(len(all_indices) * 90 / 100) :]
     train_sampler = SubsetRandomSampler(train_indices)
     test_sampler = SubsetRandomSampler(test_indices)
     train_dl = DataLoader(normalized_tensor_dataset, batch_size, sampler=train_sampler)
@@ -158,7 +176,7 @@ def train_model(model, optimizer, hx, states, target, batch_size, num_tau_sample
     T_z = target.reshape(target.shape[0], 1, -1).expand(-1, num_tau_sample, feature_len).transpose(1, 2)
 
     error_loss = T_z - z
-    huber_loss = functional.smooth_l1_loss(z, T_z.detach(), reduction='none')
+    huber_loss = functional.smooth_l1_loss(z, T_z.detach(), reduction="none")
     if num_tau_sample == 1:
         tau = torch.arange(0, 1, 1 / 100).view(1, 100)
     else:
@@ -184,7 +202,7 @@ def test_model(model, hx, states, target, batch_size, num_tau_sample, device, fe
     T_z = target.reshape(target.shape[0], 1, -1).expand(-1, num_tau_sample, feature_len).transpose(1, 2)
 
     error_loss = T_z - z
-    huber_loss = functional.smooth_l1_loss(z, T_z.detach(), reduction='none')
+    huber_loss = functional.smooth_l1_loss(z, T_z.detach(), reduction="none")
     if num_tau_sample == 1:
         tau = torch.arange(0, 1, 1 / 100).view(1, 100)
     else:
@@ -212,8 +230,9 @@ def feed_forward(model, hx, states, batch_size, num_tau_sample, sampling_size, t
     return z, hx
 
 
-def ss_learn_model(model, optimizer, memory, max_len, gru_size, num_tau_sample, device, epsilon, clip_value, feature_len,
-                   has_memory):
+def ss_learn_model(
+    model, optimizer, memory, max_len, gru_size, num_tau_sample, device, epsilon, clip_value, feature_len, has_memory
+):
     total_loss = 0
     count = 0
     model.train()
@@ -226,33 +245,74 @@ def ss_learn_model(model, optimizer, memory, max_len, gru_size, num_tau_sample, 
                 if h_memory is None:
                     h_memory = torch.zeros(len(s_batch) * num_tau_sample, gru_size)
                 if random.random() <= epsilon or s_hat is None:
-                    s_hat, loss, h_memory = train_model(model, optimizer, h_memory.detach().to(device), s, mc_return,
-                                                        len(s_batch), num_tau_sample, device, clip_value, feature_len)
+                    s_hat, loss, h_memory = train_model(
+                        model,
+                        optimizer,
+                        h_memory.detach().to(device),
+                        s,
+                        mc_return,
+                        len(s_batch),
+                        num_tau_sample,
+                        device,
+                        clip_value,
+                        feature_len,
+                    )
                 else:
                     if len(s_hat) != len(s):
-                        s_hat = s_hat[:len(s)]
-                    s_hat, loss, h_memory = train_model(model, optimizer, h_memory.detach().to(device), s_hat.detach(),
-                                                        mc_return, len(s_batch), num_tau_sample, device, clip_value,
-                                                        feature_len)
+                        s_hat = s_hat[: len(s)]
+                    s_hat, loss, h_memory = train_model(
+                        model,
+                        optimizer,
+                        h_memory.detach().to(device),
+                        s_hat.detach(),
+                        mc_return,
+                        len(s_batch),
+                        num_tau_sample,
+                        device,
+                        clip_value,
+                        feature_len,
+                    )
                 total_loss += loss.item()
                 count += 1
         else:
             for i in range(max_len):
                 s, mc_return = s_batch[:, i], mc_returns[:, i]
                 if random.random() <= epsilon or s_hat is None:
-                    s_hat, loss, _ = train_model(model, optimizer, None, s, mc_return, len(s_batch), num_tau_sample,
-                                                 device, clip_value, feature_len)
+                    s_hat, loss, _ = train_model(
+                        model,
+                        optimizer,
+                        None,
+                        s,
+                        mc_return,
+                        len(s_batch),
+                        num_tau_sample,
+                        device,
+                        clip_value,
+                        feature_len,
+                    )
                 else:
                     if len(s_hat) != len(s):
-                        s_hat = s_hat[:len(s)]
-                    s_hat, loss, _ = train_model(model, optimizer, None, s_hat.detach(), mc_return, len(s_batch),
-                                                 num_tau_sample, device, clip_value, feature_len)
+                        s_hat = s_hat[: len(s)]
+                    s_hat, loss, _ = train_model(
+                        model,
+                        optimizer,
+                        None,
+                        s_hat.detach(),
+                        mc_return,
+                        len(s_batch),
+                        num_tau_sample,
+                        device,
+                        clip_value,
+                        feature_len,
+                    )
                 total_loss += loss.item()
                 count += 1
     return total_loss / count
 
 
-def ss_evaluate_model(model, memory, max_len, gru_size, num_tau_sample, device, best_total_loss, path, epsilon, feature_len, has_memory):
+def ss_evaluate_model(
+    model, memory, max_len, gru_size, num_tau_sample, device, best_total_loss, path, epsilon, feature_len, has_memory
+):
     total_loss = 0
     count = 0
     model.eval()
@@ -265,13 +325,29 @@ def ss_evaluate_model(model, memory, max_len, gru_size, num_tau_sample, device, 
                 if h_memory is None:
                     h_memory = torch.zeros(len(s_batch) * num_tau_sample, gru_size)
                 if random.random() <= epsilon or s_hat is None:
-                    s_hat, loss, h_memory = test_model(model, h_memory.detach().to(device), s, mc_return, len(s_batch),
-                                                       num_tau_sample, device, feature_len)
+                    s_hat, loss, h_memory = test_model(
+                        model,
+                        h_memory.detach().to(device),
+                        s,
+                        mc_return,
+                        len(s_batch),
+                        num_tau_sample,
+                        device,
+                        feature_len,
+                    )
                 else:
                     if len(s_hat) != len(s):
-                        s_hat = s_hat[:len(s)]
-                    s_hat, loss, h_memory = test_model(model, h_memory.detach().to(device), s_hat.detach(), mc_return,
-                                                       len(s_batch), num_tau_sample, device, feature_len)
+                        s_hat = s_hat[: len(s)]
+                    s_hat, loss, h_memory = test_model(
+                        model,
+                        h_memory.detach().to(device),
+                        s_hat.detach(),
+                        mc_return,
+                        len(s_batch),
+                        num_tau_sample,
+                        device,
+                        feature_len,
+                    )
                 s_hat = s_hat.squeeze(2)
                 total_loss += loss
                 count += 1
@@ -279,21 +355,23 @@ def ss_evaluate_model(model, memory, max_len, gru_size, num_tau_sample, device, 
             for i in range(max_len):
                 s, mc_return = s_batch[:, i], mc_returns[:, i]
                 if random.random() <= epsilon or s_hat is None:
-                    s_hat, loss, _ = test_model(model, None, s, mc_return, len(s_batch), num_tau_sample, device,
-                                                feature_len)
+                    s_hat, loss, _ = test_model(
+                        model, None, s, mc_return, len(s_batch), num_tau_sample, device, feature_len
+                    )
                 else:
                     if len(s_hat) != len(s):
-                        s_hat = s_hat[:len(s)]
-                    s_hat, loss, _ = test_model(model, None, s_hat.detach(), mc_return, len(s_batch), num_tau_sample,
-                                                device, feature_len)
+                        s_hat = s_hat[: len(s)]
+                    s_hat, loss, _ = test_model(
+                        model, None, s_hat.detach(), mc_return, len(s_batch), num_tau_sample, device, feature_len
+                    )
                 s_hat = s_hat.squeeze(2)
                 total_loss += loss
                 count += 1
-    print("test loss :", total_loss.item() / count)
+    # print("test loss :", total_loss.item() / count)
     if total_loss.item() / count <= best_total_loss:
-        print("Saving the best model!")
+        # print("Saving the best model!")
         best_total_loss = total_loss.item() / count
-        torch.save(model.state_dict(), path)
+        # torch.save(model.state_dict(), path)
     return total_loss.item() / count, best_total_loss
 
 
@@ -314,7 +392,7 @@ def epsilon_decay(epsilon, num_iterations, iteration, decay_type="linear", k=0.9
         step = 1 / (num_iterations * 2)
         return round(epsilon - step, 6)
     elif decay_type == "exponential":
-        return max(k ** iteration, 0.5)
+        return max(k**iteration, 0.5)
 
 
 def measure_as(distribution, actual_return, input_len):
@@ -351,13 +429,23 @@ def false_alarm_rater(thresholds, scores, nominal_len):
 def merged_confusion_matrix(scores, anom_occurrence):
     fpr, tpr, thresholds = roc_curve(anom_occurrence, scores)
     auc = sklearn.metrics.auc(fpr, tpr)
-    nominal_len = np.where(anom_occurrence==1)[0][0]
+    nominal_len = np.where(anom_occurrence == 1)[0][0]
     far = false_alarm_rater(thresholds, scores, nominal_len)
     return auc, far
 
 
-def ar_anomaly_detection(predictor, gru_size, num_tau_sample, sampling_size, device, feature_len, episode, horizon,
-                         anomaly_occurrence, has_memory):
+def ar_anomaly_detection(
+    predictor,
+    gru_size,
+    num_tau_sample,
+    sampling_size,
+    device,
+    feature_len,
+    episode,
+    horizon,
+    anomaly_occurrence,
+    has_memory,
+):
     predictor.eval()
     estimated_dists = []
     anomaly_scores = []
@@ -366,8 +454,15 @@ def ar_anomaly_detection(predictor, gru_size, num_tau_sample, sampling_size, dev
         for i in range(len(episode) - horizon):
             state = episode[i][:, :feature_len]
             state = torch.Tensor(state)
-            value_return, h_memory = feed_forward(predictor, h_memory.detach().to(device), state, len(state),
-                                                  num_tau_sample, sampling_size, tree_root=True)
+            value_return, h_memory = feed_forward(
+                predictor,
+                h_memory.detach().to(device),
+                state,
+                len(state),
+                num_tau_sample,
+                sampling_size,
+                tree_root=True,
+            )
             # unaffected_h_memory: a trick to keep memory of rnn unaffected
             unaffected_h_memory = h_memory
             for j in range(1, horizon):
@@ -376,9 +471,15 @@ def ar_anomaly_detection(predictor, gru_size, num_tau_sample, sampling_size, dev
                 value_return_t = value_return
                 h_memory_t = h_memory
                 for sample in range(sampling_size):
-                    value_return, h_memory = feed_forward(predictor, h_memory_t[sample, :].detach().reshape(1, -1),
-                                                          value_return_t[:, :, sample], len(value_return_t),
-                                                          num_tau_sample, sampling_size, tree_root=False)
+                    value_return, h_memory = feed_forward(
+                        predictor,
+                        h_memory_t[sample, :].detach().reshape(1, -1),
+                        value_return_t[:, :, sample],
+                        len(value_return_t),
+                        num_tau_sample,
+                        sampling_size,
+                        tree_root=False,
+                    )
                     tmp_h_memory.append(h_memory)
                     tmp_value_return.append(value_return)
                 h_memory = torch.stack(tmp_h_memory).squeeze(1)
@@ -386,27 +487,41 @@ def ar_anomaly_detection(predictor, gru_size, num_tau_sample, sampling_size, dev
 
             h_memory = unaffected_h_memory
             estimated_dists.append(value_return.squeeze(0).detach().cpu().numpy())
-            anomaly_score = measure_as(value_return.squeeze(0).detach().cpu().numpy(),
-                                       episode[i + horizon][:, :feature_len].squeeze(0), feature_len)
+            anomaly_score = measure_as(
+                value_return.squeeze(0).detach().cpu().numpy(),
+                episode[i + horizon][:, :feature_len].squeeze(0),
+                feature_len,
+            )
             anomaly_scores.append(anomaly_score)
     else:
         for i in range(len(episode) - horizon):
             state = episode[i][:, :feature_len]
             state = torch.Tensor(state)
-            value_return, _ = feed_forward(predictor, None, state, len(state), num_tau_sample, sampling_size,
-                                           tree_root=True)
+            value_return, _ = feed_forward(
+                predictor, None, state, len(state), num_tau_sample, sampling_size, tree_root=True
+            )
             for j in range(1, horizon):
                 tmp_value_return = []
                 value_return_t = value_return
                 for sample in range(sampling_size):
-                    value_return, _ = feed_forward(predictor, None, value_return_t[:, :, sample], len(value_return_t),
-                                                   num_tau_sample, sampling_size, tree_root=False)
+                    value_return, _ = feed_forward(
+                        predictor,
+                        None,
+                        value_return_t[:, :, sample],
+                        len(value_return_t),
+                        num_tau_sample,
+                        sampling_size,
+                        tree_root=False,
+                    )
                     tmp_value_return.append(value_return)
                 value_return = torch.stack(tmp_value_return).squeeze(1).reshape(1, feature_len, -1)
 
             estimated_dists.append(value_return.squeeze(0).detach().cpu().numpy())
-            anomaly_score = measure_as(value_return.squeeze(0).detach().cpu().numpy(),
-                                       episode[i + horizon][:, :feature_len].squeeze(0), feature_len)
+            anomaly_score = measure_as(
+                value_return.squeeze(0).detach().cpu().numpy(),
+                episode[i + horizon][:, :feature_len].squeeze(0),
+                feature_len,
+            )
             anomaly_scores.append(anomaly_score)
     separated_results = separated_confusion_matrix(anomaly_scores, anomaly_occurrence, feature_len)
     averaged_as = np.array(anomaly_scores).mean(axis=1)
@@ -415,37 +530,49 @@ def ar_anomaly_detection(predictor, gru_size, num_tau_sample, sampling_size, dev
     merged_max_auc, max_fa_rate = merged_confusion_matrix(maxed_as, anomaly_occurrence)
     # print("Averaged AUC:", merged_avg_auc)
     # print("Max AUC:", merged_max_auc)
-    return separated_results, np.array(episode).squeeze(1), np.array(estimated_dists), merged_avg_auc, merged_max_auc, \
-           anomaly_scores, avg_fa_rate, max_fa_rate
+    return (
+        separated_results,
+        np.array(episode).squeeze(1),
+        np.array(estimated_dists),
+        merged_avg_auc,
+        merged_max_auc,
+        anomaly_scores,
+        avg_fa_rate,
+        max_fa_rate,
+    )
 
 
 def plot_accuracy(feature_len, mc_returns, h_distributions, result_folder, anomaly_insertion, horizons, env_name):
     fig, axs = plt.subplots(math.ceil(feature_len / 3), 3, figsize=(20, 20))
-    colors = ['deepskyblue', 'chartreuse', 'violet']
+    colors = ["deepskyblue", "chartreuse", "violet"]
     labels = ["True returns", "Anomaly injection"]
-    used_colors = ['black', 'red']
+    used_colors = ["black", "red"]
     for h_i, h in enumerate(horizons):
         r, c = 0, 0
         for i in range(feature_len):
             for xxx in range(len(h_distributions[h][:, i])):
-                axs[r, c].scatter(np.zeros(len(h_distributions[h][:, i][xxx])) + xxx + h, h_distributions[h][:, i][xxx],
-                                  marker='.', color=colors[h_i])
-            axs[r, c].plot(mc_returns[:, i], color='black')
-            axs[r, c].axvline(x=anomaly_insertion, color='red')
+                axs[r, c].scatter(
+                    np.zeros(len(h_distributions[h][:, i][xxx])) + xxx + h,
+                    h_distributions[h][:, i][xxx],
+                    marker=".",
+                    color=colors[h_i],
+                )
+            axs[r, c].plot(mc_returns[:, i], color="black")
+            axs[r, c].axvline(x=anomaly_insertion, color="red")
             axs[r, c].set_title("Feature: " + str(i))
-            axs[r, c].set(xlabel='time', ylabel='value')
+            axs[r, c].set(xlabel="time", ylabel="value")
             if r < math.ceil(feature_len / 3) - 1:
                 r += 1
             else:
                 c += 1
                 r = 0
-        labels.append("H="+str(h))
+        labels.append("H=" + str(h))
         used_colors.append(colors[h_i])
 
     fig.legend(labels=labels, labelcolor=used_colors, handlelength=0)
-    fig.suptitle("Autoregressive model predictions vs. true data\n"
-                 "Horizon: " + str(horizons) + "\n"
-                 "Env: " + env_name + "\n")
+    fig.suptitle(
+        "Autoregressive model predictions vs. true data\n" "Horizon: " + str(horizons) + "\n" "Env: " + env_name + "\n"
+    )
     fig.tight_layout()
     fig.savefig(os.path.join(result_folder, "rnn_predictions_vs_truedata_h" + str(horizons) + ".png"))
     fig.show()
@@ -458,7 +585,7 @@ def original_cusum(anomaly_scores, feature_len=18):
     cusums = {}
     for key in range(feature_len):
         cusums[key] = []
-        cusums[key] = detect_cusum(anomaly_scores[:, key], threshold=0.01, drift=.0018, ending=True, show=False)[0]
+        cusums[key] = detect_cusum(anomaly_scores[:, key], threshold=0.01, drift=0.0018, ending=True, show=False)[0]
     return cusums
 
 
@@ -470,52 +597,70 @@ def states_min_max_finder(train_dataset):
 
 def input_arg_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--test_policy', action='store_true', default=False,
-                        help="To test the policy")
-    parser.add_argument('--train_predictive_model', action='store_true', default=False,
-                        help="To train the predictive models")
-    parser.add_argument('--env_name', type=str,
-                        help="Environment of interest")
-    parser.add_argument('--iterations', type=int, default=1000000,
-                        help="Training iterations")
-    parser.add_argument('--clip_obs', type=float, default=10.,
-                        help="Clipping observations for normalization")
-    parser.add_argument('--power', type=float,
-                        help="Power applied to the taken actions (as the nominal power). Being used for model path")
-    parser.add_argument('--anomalous_power', type=float, default=None,
-                        help="Power applied to the taken actions (as the anomalous power)")
-    parser.add_argument('--anomaly_injection', type=int, default=None,
-                        help="When to inject anomaly")
-    parser.add_argument('--horizons', nargs='+', type=int,
-                        help="Horizon to go forward in time")
-    parser.add_argument('--n_eval_episodes', type=int, default=10,
-                        help="Number of evaluation episodes")
-    parser.add_argument('--batch_size', type=int, default=128,
-                        help="Batch size")
-    parser.add_argument('--quantile_embedding_dim', type=int, default=128,
-                        help="Quantiles embedding dimension in IQN")
-    parser.add_argument('--gru_units', type=int, default=64,
-                        help="Number of cells in the GRU")
-    parser.add_argument('--num_quantile_sample', type=int, default=64,
-                        help="Number of quantile samples for IQN")
-    parser.add_argument('--decay_type', type=str, choices=["linear", "exponential"], default="linear",
-                        help="How to decay epsilon in Scheduled sampling")
-    parser.add_argument('--lr', type=float, default=0.001,
-                        help="Learning rate")
-    parser.add_argument('--clip_value', type=int, default=None,
-                        help="Clipping gradients")
-    parser.add_argument('--num_tau_sample', type=int, default=1,
-                        help="Number of tau samples for IQN, sets the distribution sampling size.")
-    parser.add_argument('--test_interval', type=int, default=10,
-                        help="Intervals between train and test")
-    parser.add_argument('--anomaly_detection', action='store_true', default=False,
-                        help="Do the AD when anomalies injected into the system")
-    parser.add_argument('--sampling_sizes', nargs='+', type=int,
-                        help="Size of the sampling to build the tree of distributions at time t")
-    parser.add_argument('--case', type=int,
-                        help="Which case of environment to run. Works like -v suffix in standard environment naming.")
-    parser.add_argument('--is_recurrent_v2', action='store_true', default=False,
-                        help="Determines whether the model has memory or not -- v2 RNN model")
+    parser.add_argument("--test_policy", action="store_true", default=False, help="To test the policy")
+    parser.add_argument(
+        "--train_predictive_model", action="store_true", default=False, help="To train the predictive models"
+    )
+    parser.add_argument("--env_name", type=str, help="Environment of interest")
+    parser.add_argument("--iterations", type=int, default=1000000, help="Training iterations")
+    parser.add_argument("--clip_obs", type=float, default=10.0, help="Clipping observations for normalization")
+    parser.add_argument(
+        "--power",
+        type=float,
+        help="Power applied to the taken actions (as the nominal power). Being used for model path",
+    )
+    parser.add_argument(
+        "--anomalous_power",
+        type=float,
+        default=None,
+        help="Power applied to the taken actions (as the anomalous power)",
+    )
+    parser.add_argument("--anomaly_injection", type=int, default=None, help="When to inject anomaly")
+    parser.add_argument("--horizons", nargs="+", type=int, help="Horizon to go forward in time")
+    parser.add_argument("--n_eval_episodes", type=int, default=10, help="Number of evaluation episodes")
+    parser.add_argument("--batch_size", type=int, default=128, help="Batch size")
+    parser.add_argument("--quantile_embedding_dim", type=int, default=128, help="Quantiles embedding dimension in IQN")
+    parser.add_argument("--gru_units", type=int, default=64, help="Number of cells in the GRU")
+    parser.add_argument("--num_quantile_sample", type=int, default=64, help="Number of quantile samples for IQN")
+    parser.add_argument(
+        "--decay_type",
+        type=str,
+        choices=["linear", "exponential"],
+        default="linear",
+        help="How to decay epsilon in Scheduled sampling",
+    )
+    parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
+    parser.add_argument("--clip_value", type=int, default=None, help="Clipping gradients")
+    parser.add_argument(
+        "--num_tau_sample",
+        type=int,
+        default=1,
+        help="Number of tau samples for IQN, sets the distribution sampling size.",
+    )
+    parser.add_argument("--test_interval", type=int, default=10, help="Intervals between train and test")
+    parser.add_argument(
+        "--anomaly_detection",
+        action="store_true",
+        default=False,
+        help="Do the AD when anomalies injected into the system",
+    )
+    parser.add_argument(
+        "--sampling_sizes",
+        nargs="+",
+        type=int,
+        help="Size of the sampling to build the tree of distributions at time t",
+    )
+    parser.add_argument(
+        "--case",
+        type=int,
+        help="Which case of environment to run. Works like -v suffix in standard environment naming.",
+    )
+    parser.add_argument(
+        "--is_recurrent_v2",
+        action="store_true",
+        default=False,
+        help="Determines whether the model has memory or not -- v2 RNN model",
+    )
     args = parser.parse_args()
     return args
 
@@ -542,12 +687,27 @@ if __name__ == "__main__":
         model = TD3.load(policy_model_path)
         random_seed = random.randint(0, 1000)
         env = DummyVecEnv(
-            [env_preparation.make_env(args.env_name, 0, random_seed, wrapper_class=env_preparation.TimeFeatureWrapper,
-                                      env_kwargs={'power': args.anomalous_power,
-                                                  'anomaly_injection': args.anomaly_injection,
-                                                  'case': args.case})])
-        env = VecVideoRecorder(env, env_dir, record_video_trigger=lambda x: x == 0, video_length=1000,
-                               name_prefix="ap" + str(args.anomalous_power) + "_ai" + str(args.anomaly_injection))
+            [
+                env_preparation.make_env(
+                    args.env_name,
+                    0,
+                    random_seed,
+                    wrapper_class=env_preparation.TimeFeatureWrapper,
+                    env_kwargs={
+                        "power": args.anomalous_power,
+                        "anomaly_injection": args.anomaly_injection,
+                        "case": args.case,
+                    },
+                )
+            ]
+        )
+        env = VecVideoRecorder(
+            env,
+            env_dir,
+            record_video_trigger=lambda x: x == 0,
+            video_length=1000,
+            name_prefix="ap" + str(args.anomalous_power) + "_ai" + str(args.anomaly_injection),
+        )
 
         env = VecNormalize(env, norm_obs=True, norm_reward=False, clip_obs=args.clip_obs)
         #  do not update them at test time
@@ -570,11 +730,13 @@ if __name__ == "__main__":
         train_rb, test_rb, max_len = data_splitting(memory_rb, args.batch_size, states_min, states_max, device)
         print("Predictor's data loaded!")
         if args.is_recurrent_v2:
-            predictive_model = AutoregressiveRecurrentIQN_v2(num_features, args.gru_units, args.quantile_embedding_dim,
-                                                         args.num_quantile_sample, device)
+            predictive_model = AutoregressiveRecurrentIQN_v2(
+                num_features, args.gru_units, args.quantile_embedding_dim, args.num_quantile_sample, device
+            )
         else:
-            predictive_model = AutoregressiveIQN(num_features, args.quantile_embedding_dim, args.num_quantile_sample,
-                                                 device)
+            predictive_model = AutoregressiveIQN(
+                num_features, args.quantile_embedding_dim, args.num_quantile_sample, device
+            )
         if os.path.exists(predictive_model_path):
             print("Loading pre-trained model!")
             predictive_model.load_state_dict(torch.load(predictive_model_path, map_location=device))
@@ -586,16 +748,35 @@ if __name__ == "__main__":
         all_train_losses, all_test_losses = [], []
         best_total_loss = float("inf")
         for i in range(args.iterations):
-            total_loss = ss_learn_model(predictive_model, optimizer, train_rb, max_len, args.gru_units,
-                                        args.num_tau_sample, device, epsilon, args.clip_value, num_features,
-                                        args.is_recurrent_v2)
+            total_loss = ss_learn_model(
+                predictive_model,
+                optimizer,
+                train_rb,
+                max_len,
+                args.gru_units,
+                args.num_tau_sample,
+                device,
+                epsilon,
+                args.clip_value,
+                num_features,
+                args.is_recurrent_v2,
+            )
             if i % args.test_interval == 0:
                 print("train loss : {}".format(total_loss))
                 all_train_losses.append(total_loss)
-                avg_eval_loss, best_total_loss = ss_evaluate_model(predictive_model, test_rb, max_len, args.gru_units,
-                                                                   args.num_tau_sample, device, best_total_loss,
-                                                                   predictive_model_path, epsilon, num_features,
-                                                                   args.is_recurrent_v2)
+                avg_eval_loss, best_total_loss = ss_evaluate_model(
+                    predictive_model,
+                    test_rb,
+                    max_len,
+                    args.gru_units,
+                    args.num_tau_sample,
+                    device,
+                    best_total_loss,
+                    predictive_model_path,
+                    epsilon,
+                    num_features,
+                    args.is_recurrent_v2,
+                )
                 all_test_losses.append(avg_eval_loss)
                 plot_losses(all_train_losses, all_test_losses, env_dir, args.is_recurrent_v2, scheduled_sampling=True)
             epsilon = epsilon_decay(epsilon, args.iterations, i, args.decay_type)
@@ -605,11 +786,13 @@ if __name__ == "__main__":
 
     elif args.anomaly_detection:
         if args.is_recurrent_v2:
-            predictive_model = AutoregressiveRecurrentIQN_v2(num_features, args.gru_units, args.quantile_embedding_dim,
-                                                             args.num_quantile_sample, device)
+            predictive_model = AutoregressiveRecurrentIQN_v2(
+                num_features, args.gru_units, args.quantile_embedding_dim, args.num_quantile_sample, device
+            )
         else:
-            predictive_model = AutoregressiveIQN(num_features, args.quantile_embedding_dim, args.num_quantile_sample,
-                                                 device)
+            predictive_model = AutoregressiveIQN(
+                num_features, args.quantile_embedding_dim, args.num_quantile_sample, device
+            )
         predictive_model.load_state_dict(torch.load(predictive_model_path, map_location=device))
         print("Trained model loaded:", predictive_model_path)
         predictive_model.to(device)
@@ -639,10 +822,20 @@ if __name__ == "__main__":
                 for _ in range(args.n_eval_episodes):
                     random_seed = random.randint(0, 1000)
                     env = DummyVecEnv(
-                        [env_preparation.make_env(args.env_name, 0, random_seed, wrapper_class=env_preparation.TimeFeatureWrapper,
-                                                  env_kwargs={'power': args.anomalous_power,
-                                                              'anomaly_injection': args.anomaly_injection,
-                                                              'case': args.case})])
+                        [
+                            env_preparation.make_env(
+                                args.env_name,
+                                0,
+                                random_seed,
+                                wrapper_class=env_preparation.TimeFeatureWrapper,
+                                env_kwargs={
+                                    "power": args.anomalous_power,
+                                    "anomaly_injection": args.anomaly_injection,
+                                    "case": args.case,
+                                },
+                            )
+                        ]
+                    )
                     env = VecNormalize(env, norm_obs=True, norm_reward=False, clip_obs=args.clip_obs)
                     # do not update them at test time
                     env.training = False
@@ -653,8 +846,14 @@ if __name__ == "__main__":
                     # print(f"Best model mean reward = {mean_reward:.2f} +/- {std_reward:.2f}")
 
                     # normalizing data
-                    tmp_observations = ((np.array(observations[0])[:, :, :num_features] - states_min) / (states_max - states_min))
-                    normalized_observations = [np.concatenate((tmp_observations, np.array(observations[0])[:, :, num_features].reshape(-1, 1, 1)), axis=2)]
+                    tmp_observations = (np.array(observations[0])[:, :, :num_features] - states_min) / (
+                        states_max - states_min
+                    )
+                    normalized_observations = [
+                        np.concatenate(
+                            (tmp_observations, np.array(observations[0])[:, :, num_features].reshape(-1, 1, 1)), axis=2
+                        )
+                    ]
                     normalized_observations = np.array(normalized_observations)
                     for index in no_need_normalization:
                         normalized_observations[0, :, 0, index] = states_min[index]
@@ -662,11 +861,28 @@ if __name__ == "__main__":
                     dists_per_horizon = {}
 
                     when_anomaly_occurred = np.zeros(len(normalized_observations[0]) - h)
-                    when_anomaly_occurred[args.anomaly_injection - h:] = 1
-                    sep_features_r, true_r, dist_r, merg_avg_auc, merg_max_auc, ass,\
-                        avg_f_a_rate, max_f_a_rate = ar_anomaly_detection(predictive_model, args.gru_units, args.num_tau_sample,
-                                                                       args.sampling_sizes[0], device, num_features, normalized_observations[0],
-                                                                       h, when_anomaly_occurred, args.is_recurrent_v2)
+                    when_anomaly_occurred[args.anomaly_injection - h :] = 1
+                    (
+                        sep_features_r,
+                        true_r,
+                        dist_r,
+                        merg_avg_auc,
+                        merg_max_auc,
+                        ass,
+                        avg_f_a_rate,
+                        max_f_a_rate,
+                    ) = ar_anomaly_detection(
+                        predictive_model,
+                        args.gru_units,
+                        args.num_tau_sample,
+                        args.sampling_sizes[0],
+                        device,
+                        num_features,
+                        normalized_observations[0],
+                        h,
+                        when_anomaly_occurred,
+                        args.is_recurrent_v2,
+                    )
                     all_avg_aucs.append(merg_avg_auc)
                     all_max_aucs.append(merg_max_auc)
                     all_avg_false_alarm_rates.append(avg_f_a_rate)
@@ -695,9 +911,13 @@ if __name__ == "__main__":
                     print("Averaging all avg AUCs:", round(sum(all_avg_aucs) / len(all_avg_aucs), 2))
                 if len(all_max_aucs) != 0:
                     print("Averaging all max AUCs:", round(sum(all_max_aucs) / len(all_max_aucs), 2))
-                print("Average of change-point detection times - using features and original CUSUM:",
-                      np.array(on_features_original_changes).mean())
-                print("Average of change-point detection times - using anomaly scores and original CUSUM:",
-                      np.array(on_scores_original_changes).mean())
+                print(
+                    "Average of change-point detection times - using features and original CUSUM:",
+                    np.array(on_features_original_changes).mean(),
+                )
+                print(
+                    "Average of change-point detection times - using anomaly scores and original CUSUM:",
+                    np.array(on_scores_original_changes).mean(),
+                )
                 print("False alarm rate - using average scores:", round(np.array(all_avg_false_alarm_rates).mean(), 2))
                 print("False alarm rate - using max scores:", round(np.array(all_max_false_alarm_rates).mean(), 2))
