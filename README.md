@@ -1,3 +1,10 @@
+# This repo
+
+This repo is a fork of the original [riqn-repo](https://github.com/modanesh/recurrent_implicit_quantile_networks) with some changes that make it run. 
+
+
+
+
 # Recurrent Implicit Quantile Networks
 
 This repository provides the implementation of the baseline for out-of-distribution detection in 
