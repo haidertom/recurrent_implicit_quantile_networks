@@ -6,7 +6,7 @@ import random
 import gym
 import matplotlib.pyplot as plt
 import numpy as np
-import ood_baselines.riqn.env_preparation
+from . import env_preparation
 import seaborn as sns
 import sklearn
 import torch
